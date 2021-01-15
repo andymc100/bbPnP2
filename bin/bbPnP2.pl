@@ -23,7 +23,7 @@ use List::Util qw(min max);
 use threads;
 use threads::shared;
 
-my $testMode=0;
+my $testMode=1;
 
 #use BetBot::DataLogger;
 #use BetBot::CacheUpdater;
@@ -68,8 +68,8 @@ else
 my $bot107Thread = threads->new( \&run107Bot , {'bf' => $bf, 'testMode' => $testMode }  );
 sleep 1 until defined $dataKeys{run107Bot};
 
-#my $trackOrders = threads->new( \&trackOrders , {'bf' => $bf}  );
-#sleep 1 until defined $dataKeys{run107Bot};
+my $trackOrdersTest = threads->new( \&trackOrdersTest );
+sleep 1 until defined $dataKeys{trackOrdersTest};
 
 
 while ($dataKeys{main})
@@ -84,8 +84,9 @@ while ($dataKeys{main})
   #print Dumper %orders;
   my %dataKeysTmp=%dataKeys;
   delete $dataKeysTmp{main};
-  $dataKeys{main}=min values %dataKeys;
-  sleep 5;
+  delete $dataKeysTmp{trackOrdersTest};
+  $dataKeys{main}=min values %dataKeysTmp;
+  sleep 10;
 }
 
 
@@ -596,8 +597,9 @@ sub run107Bot {
 
         if ( $strgyData{$marketId}{betPlaced} < $maxOrders and $strgyData{$marketId}{hasLives} == 1 and $strgyData{$marketId}{belowBackPrice} == 1)
         #One horse race
-        {
-     my $orderParams = {marketId    => $marketId,
+        { 
+          my $custOrderRef = $sub . "_" . $orderRef++;
+          my $orderParams = {marketId    => $marketId,
                               instructions => [{
                                                  selectionId => $strgyData{$marketId}{back1stSelection},
                                                  side => "BACK",
@@ -607,17 +609,17 @@ sub run107Bot {
                                                                  price => 1.01,
                                                                  persistenceType => "LAPSE"
                                                                },
-                         customerOrderRef => $sub . "_" . $orderRef++,
+                         customerOrderRef => $custOrderRef,
                          marketVersion => $prices{$marketId}{$i}{version},
                                               }],
                   customerStrategyRef => $strategyRef,
             async => 1
            };
            #print "pre\n";print Dumper $strgyData{$marketId};
-            placeOrders($bf, $i, $testMode, 0, $orderParams);
-            $strgyData{$marketId}{betPlaced}++;
+           placeOrders($bf, $i, $testMode, 0, $orderParams);
+           $strgyData{$marketId}{betPlaced}++;
             $strgyData{$marketId}{back107} = $strgyData{$marketId}{back1stSelection};
-            print "Backed : " . $marketId . "/" . $strgyData{$marketId}{back1stSelection} . " at " . $strgyData{$marketId}{backRunnerPrice} . "\n" ;
+            print "Placed  " .  $custOrderRef . " " . $marketId . "/" . $strgyData{$marketId}{back1stSelection} . " £" . $backSize . "@" . $strgyData{$marketId}{backRunnerPrice} . "\n" ;
       #print "post\n";print Dumper $strgyData{$marketId};
         }
   #  print Dumper %strgyData;
@@ -633,7 +635,6 @@ sub run107Bot {
 }
 
 sub placeOrders{
-  print "placeOrders\n";
   my $betId=0;
   my ($bf, $i, $testMode, $priority, $orderParams) = @_;;
         my $orderTime;
@@ -646,8 +647,8 @@ sub placeOrders{
         }
   $orderTime = $prices{$orderParams->{marketId}}{$i}{timeStamp} if $testMode;;
   foreach my $instruction (@{$orderParams->{instructions}} ) {
-          print  "instruction\n";
-          print Dumper $instruction;
+          print  "instruction\n" if $debug;
+          print Dumper $instruction if $debug;
           my %order : shared;
     $order{placedDate}=$orderTime;
     $order{marketId}=$orderParams->{marketId};
@@ -668,6 +669,8 @@ sub placeOrders{
       $order{size}=$instruction->{limitOrder}{size};
       $order{price}=$instruction->{limitOrder}{price};
       $order{sizeRemaining}=$instruction->{limitOrder}{size};
+      $order{sizeMatched}=0;
+      $order{averagePriceMatched}=1;
       $order{persistenceType}=$instruction->{limitOrder}{persistenceType};
       $order{timeInForce}=$instruction->{limitOrder}{timeInForce};
       $order{minFillSize}=$instruction->{limitOrder}{minFillSize};
@@ -685,8 +688,8 @@ sub placeOrders{
     { 
       $order{liability}=$instruction->{marketOnCloseOrder}{liability};
           }   
-    print "adding Order to shmem\n";
-    print Dumper %order;
+    print "adding Order to shmem\n" if $debug;
+    print Dumper %order  if $debug;
     $orders{$instruction->{customerOrderRef}}=\%order;
   }
     
@@ -708,33 +711,82 @@ sub trackOrdersTest{
   {
         $start=$i;  
         my $tmpMain=$dataKeys{main};
+	print "looping " . $start . " to " . $tmpMain . "\n" if $debug;;
         for ($i = $start; $i <= $tmpMain; $i++ )
         {
           while(my ($customerOrderRef, $order) = each (%orders))  
           {
             if (exists $prices{$order->{marketId}}{$i} )
-            {
-              if ( $order->{marketVersion} != $prices{$order->{marketId}}{$i}{version} and $order->{persistenceType} == "LAPSE" )
+            { 
+              my $placedDate=$order->{placedDate};
+	      my $timeStamp=$prices{$order->{marketId}}{$i}{timeStamp};
+	      $placedDate=~s/ //g;
+	      $placedDate=~s/://g;
+	      $timeStamp=~s/ //g;
+	      $timeStamp=~s/://g;
+	      print "placedDate: " . $placedDate . "\n" if $debug;
+	      print "timeStamp:  " . $timeStamp . "\n" if $debug;
+              if ( $order->{marketVersion} != $prices{$order->{marketId}}{$i}{version} and $order->{persistenceType} eq "LAPSE" and $order->{status} ne "EXECUTION_COMPLETE")
 	      #Market suspended lapse open orders
               { $order->{status} = "EXECUTION_COMPLETE" ;
 	        $order->{sizeLapsed} += $order->{sizeRemaining}	;
 	        $order->{sizeRemaining} = 0;
+                print "Lapsed   " .  $customerOrderRef . " " . $order->{marketId} . "/" . $order->{selectionId} . " £" . $order->{sizeLapsed} . "@" . $order->{price} . "\n" ;
               }
-              elsif ( ( $order->{status} == "PENDING" or $order->{status}=="EXECUTABLE" )  and $order->{placedDate}+$order->{betDelay} < $prices{$order->{marketId}}{$i}{timeStamp} )
+              elsif ( ( $order->{status} eq "PENDING" or $order->{status} eq "EXECUTABLE" )  and $placedDate+$order->{betDelay} < $timeStamp )
 	      #available to match
               {
-	          matchOrder({'order'=>\$order, 'prices'=>\$prices{$order->{marketId}}{$i}{$order->{selectionId}}})
+                 print "Checking for Match\n" if $debug;
+	         matchOrder({'customerOrderRef'=>$customerOrderRef, 'i'=>$i});
               }
 	    }
 	  }
        }
+       $dataKeys{$sub} = $i;
+       sleep 5;
   }
 }
 
 sub matchOrder
 {
-  my $params=shift;
-  if ( $params->{order}{side} == "BACK" and $params->{prices}{backAmount1} and $params->{order}{price} <= $prices->{backPrice1} )
+  my $params = shift;
+  my $i = $params->{i};
+  my $matchSize=0;
+  my $weightedPrice=1;
+  my $matched=0;
+  my $backAmount1=$prices{$orders{$params->{customerOrderRef}}{marketId}}{$i}{runners}{$orders{$params->{customerOrderRef}}{selectionId}}{backAmount1} ;
+  my $backPrice1=$prices{$orders{$params->{customerOrderRef}}{marketId}}{$i}{runners}{$orders{$params->{customerOrderRef}}{selectionId}}{backPrice1} ;
+  my $backAmount2=$prices{$orders{$params->{customerOrderRef}}{marketId}}{$i}{runners}{$orders{$params->{customerOrderRef}}{selectionId}}{backAmount2} ;
+  my $backPrice2=$prices{$orders{$params->{customerOrderRef}}{marketId}}{$i}{runners}{$orders{$params->{customerOrderRef}}{selectionId}}{backPrice2} ;
+  my $backAmount3=$prices{$orders{$params->{customerOrderRef}}{marketId}}{$i}{runners}{$orders{$params->{customerOrderRef}}{selectionId}}{backAmount3} ;
+  my $backPrice3=$prices{$orders{$params->{customerOrderRef}}{marketId}}{$i}{runners}{$orders{$params->{customerOrderRef}}{selectionId}}{backPrice3} ;
+  if ( $orders{$params->{customerOrderRef}}{side} eq "BACK" and $backAmount1 and $backPrice1 > 1 and $orders{$params->{customerOrderRef}}{price} <= $backAmount1 )
   {
+    $matchSize = min($backAmount1, $orders{$params->{customerOrderRef}}{sizeRemaining});
+    $weightedPrice=(($orders{$params->{customerOrderRef}}{averagePriceMatched}*$orders{$params->{customerOrderRef}}{sizeMatched})+($matchSize*$backPrice1))/($orders{$params->{customerOrderRef}}{sizeMatched}+$matchSize);
+    $orders{$params->{customerOrderRef}}{sizeRemaining} -= $matchSize;
+    $orders{$params->{customerOrderRef}}{sizeMatched} += $matchSize; 
+    $orders{$params->{customerOrderRef}}{averagePriceMatched} = $weightedPrice;
+    $matched++;
   }
+  if ( $orders{$params->{customerOrderRef}}{side} eq "BACK" and $backAmount2 and $backPrice2 > 1 and $orders{$params->{customerOrderRef}}{price} <= $backAmount2 )
+  {
+    $matchSize = min($backAmount2, $orders{$params->{customerOrderRef}}{sizeRemaining});
+    $weightedPrice=(($orders{$params->{customerOrderRef}}{averagePriceMatched}*$orders{$params->{customerOrderRef}}{sizeMatched})+($matchSize*$backPrice2))/($orders{$params->{customerOrderRef}}{sizeMatched}+$matchSize);
+    $orders{$params->{customerOrderRef}}{sizeRemaining} -= $matchSize;
+    $orders{$params->{customerOrderRef}}{sizeMatched} += $matchSize; 
+    $orders{$params->{customerOrderRef}}{averagePriceMatched} = $weightedPrice;
+    $matched++;
+  }
+  if ( $orders{$params->{customerOrderRef}}{side} eq "BACK" and $backAmount3 and $backPrice3 > 1 and $orders{$params->{customerOrderRef}}{price} <= $backAmount3 )
+  {
+    $matchSize = min($backAmount3, $orders{$params->{customerOrderRef}}{sizeRemaining});
+    $weightedPrice=(($orders{$params->{customerOrderRef}}{averagePriceMatched}*$orders{$params->{customerOrderRef}}{sizeMatched})+($matchSize*$backPrice3))/($orders{$params->{customerOrderRef}}{sizeMatched}+$matchSize);
+    $orders{$params->{customerOrderRef}}{sizeRemaining} -= $matchSize;
+    $orders{$params->{customerOrderRef}}{sizeMatched} += $matchSize; 
+    $orders{$params->{customerOrderRef}}{averagePriceMatched} = $weightedPrice;
+    $matched++;
+  }
+  $orders{$params->{customerOrderRef}}{status}="EXECUTION_COMPLETE" if $orders{$params->{customerOrderRef}}{sizeRemaining} == 0; ;
+  print "Matched " .  $params->{customerOrderRef} . " " . $orders{$params->{customerOrderRef}}{marketId} . "/" . $orders{$params->{customerOrderRef}}{selectionId} . " £" . $orders{$params->{customerOrderRef}}{sizeMatched} . "@" . $orders{$params->{customerOrderRef}}{averagePriceMatched} . "\n" ;
 }
